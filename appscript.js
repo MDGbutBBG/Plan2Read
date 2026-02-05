@@ -1,5 +1,5 @@
 /* Plan2Read Backend API
-  เชื่อมต่อกับ Google Spreadsheet ID: 1gCtou7_nZxufm5-EuTtBirgEctHN-pkcmHk42z84WVI
+   เชื่อมต่อกับ Google Spreadsheet ID: 1gCtou7_nZxufm5-EuTtBirgEctHN-pkcmHk42z84WVI
 */
 
 const SPREADSHEET_ID = '1gCtou7_nZxufm5-EuTtBirgEctHN-pkcmHk42z84WVI';
@@ -67,6 +67,10 @@ function handleGetRequest(action, params) {
     case 'getDiscussions':
       // ดึงกระทู้พูดคุย
       return getDataFromSheet(db, SHEETS.DISCUSSIONS);
+      
+    case 'getComments':
+      // ดึงคอมเมนต์ของโพสต์
+      return getComments(db, params.post_id);
 
     default:
       return { status: 'error', message: 'Unknown action: ' + action };
@@ -80,11 +84,17 @@ function handlePostRequest(action, data) {
     case 'createSchedule':
       return createSchedule(db, data);
       
+    case 'cloneSchedule':
+      return cloneSchedule(db, data);
+      
     case 'addSession':
       return addSession(db, data);
       
     case 'createPost':
       return createPost(db, data);
+      
+    case 'addComment':
+      return addComment(db, data);
       
     case 'deleteSession':
        return deleteRowByColumn(db, SHEETS.SESSIONS, 'session_id', data.session_id);
@@ -101,6 +111,8 @@ function handlePostRequest(action, data) {
 // 1. ดึงข้อมูล Schedules + Join กับ Users (ถ้าจำเป็น)
 function getSchedules(db, userId) {
   const sheet = db.getSheetByName(SHEETS.SCHEDULES);
+  if (!sheet) return { status: 'error', message: 'Sheet "schedules" not found' };
+  
   const data = sheet.getDataRange().getValues();
   const headers = data.shift(); // เอาหัวตารางออก
   
@@ -129,6 +141,8 @@ function getSchedules(db, userId) {
 // 2. ดึง Sessions ของ Schedule ID นั้นๆ
 function getSessions(db, scheduleId) {
   const allSessions = getDataFromSheet(db, SHEETS.SESSIONS);
+  if (allSessions.status === 'error') return allSessions;
+
   // Filter เฉพาะของ schedule_id ที่ต้องการ
   const filtered = allSessions.data.filter(s => s.schedule_id == scheduleId);
   return { status: 'success', data: filtered };
@@ -179,6 +193,84 @@ function createPost(db, data) {
   return { status: 'success', message: 'Post created' };
 }
 
+// 6. ดึง Comments ของ Post ID
+function getComments(db, postId) {
+  const allComments = getDataFromSheet(db, SHEETS.COMMENTS);
+  if (allComments.status === 'error') return allComments;
+
+  const filtered = allComments.data.filter(c => c.post_id == postId);
+  return { status: 'success', data: filtered };
+}
+
+// 7. เพิ่ม Comment
+function addComment(db, data) {
+  const sheet = db.getSheetByName(SHEETS.COMMENTS);
+  if (!sheet) return { status: 'error', message: 'Sheet "comments" not found' };
+
+  const newRow = [
+    data.comment_id,
+    data.post_id,
+    data.user_id || 'guest',
+    data.content,
+    new Date()
+  ];
+  sheet.appendRow(newRow);
+  return { status: 'success', message: 'Comment added' };
+}
+
+// 8. Clone Schedule (Optimized)
+function cloneSchedule(db, data) {
+  const sourceId = data.source_schedule_id;
+  const newId = data.new_schedule_id;
+  const newUserId = data.new_user_id;
+  const newName = data.new_schedule_name;
+
+  // 1. Create New Schedule Header
+  const schSheet = db.getSheetByName(SHEETS.SCHEDULES);
+  schSheet.appendRow([
+    newId,
+    newUserId,
+    newName,
+    'Cloned from ' + sourceId,
+    false,
+    new Date()
+  ]);
+
+  // 2. Clone Sessions
+  const sessSheet = db.getSheetByName(SHEETS.SESSIONS);
+  const sessData = sessSheet.getDataRange().getValues();
+  // Find index of 'schedule_id' column (Assume col 2 -> index 1)
+  // But safest to use helper or hardcode based on schema. 
+  // Schema: session_id(0), schedule_id(1), day(2), subject(3), start(4), end(5)
+  
+  const sessionsToClone = [];
+  // Skip header (row 0)
+  for (let i = 1; i < sessData.length; i++) {
+    if (sessData[i][1] == sourceId) {
+      const original = sessData[i];
+      // Create new session row
+      sessionsToClone.push([
+        'sess_' + newId + '_' + i, // Generate new unique ID
+        newId, // New Schedule ID
+        original[2], // Day
+        original[3], // Subject
+        original[4], // Start
+        original[5]  // End
+      ]);
+    }
+  }
+
+  // Batch insert if there are sessions
+  if (sessionsToClone.length > 0) {
+      // getRange(row, col, numRows, numCols)
+      const startRow = sessSheet.getLastRow() + 1;
+      sessSheet.getRange(startRow, 1, sessionsToClone.length, 6).setValues(sessionsToClone);
+  }
+
+  return { status: 'success', message: 'Schedule cloned successfully' };
+}
+
+
 /* =========================================
    HELPER FUNCTIONS
    ========================================= */
@@ -186,7 +278,7 @@ function createPost(db, data) {
 // ฟังก์ชันแปลงข้อมูลใน Sheet เป็น Array of Objects
 function getDataFromSheet(db, sheetName) {
   const sheet = db.getSheetByName(sheetName);
-  if (!sheet) return { status: 'error', message: 'Sheet not found' };
+  if (!sheet) return { status: 'error', message: 'Sheet "' + sheetName + '" not found' };
   
   const data = sheet.getDataRange().getValues();
   if (data.length === 0) return { status: 'success', data: [] };
@@ -228,29 +320,6 @@ function createJSONOutput(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
 }
-
-/* =========================================
-   TESTING FUNCTIONS (สำหรับทดสอบใน Editor)
-   เลือกฟังก์ชันนี้แล้วกด Run เพื่อทดสอบแทน doGet
-   ========================================= */
-function testDoGet() {
-  // จำลอง Event Object (e)
-  const e = {
-    parameter: {
-      action: 'getSchedules', 
-      user_id: 'test_user_01'
-    }
-  };
-  
-  console.log("Testing doGet...");
-  const result = doGet(e);
-  console.log(result.getContent());
-}
-
-/* หมายเหตุ: 
-  - อย่าลืมสร้าง Sheet ชื่อ: users, schedules, study_sessions, discussions, comments ใน Google Sheet
-  - แถวที่ 1 ของแต่ละ Sheet ต้องเป็นชื่อ Column ตาม Database Design (ภาษาอังกฤษ)
-*/
 
 /* =========================================
    TEMPLATE HELPER
